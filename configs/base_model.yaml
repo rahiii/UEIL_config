@@ -1,0 +1,137 @@
+## Base template config for a new model.
+## 
+## How to use this file:
+## 1) Copy it to: configs/<your_model_name>.yaml
+## 2) Rename `model:` below to <your_model_name>.
+## 3) Update each section (setup, input, models, training, output) for your use case.
+## 4) Run: bash scripts/setup.sh configs/<your_model_name>.yaml
+## 5) Implement a matching adapter: framework/adapters/<your_model_name>.py
+
+model: base_model  # rename this to your model name, e.g. "mymodel"
+
+setup:
+  # Python version for the conda env created by scripts/setup.sh
+  python: "3.10"
+
+  # Packages installed with conda (good for numpy/scipy/matplotlib, etc.)
+  conda:
+    - "numpy"
+    - "scipy"
+    - "matplotlib"
+    - "pyyaml"
+
+  # Packages installed with pip (typically deep learning libraries and extras)
+  pip:
+    - "torch"
+    - "torchvision"
+    # - "your-extra-package"  # add any extra dependencies here
+
+input:
+  # Where your training/inference data lives and how to read it.
+  data_input:
+    # Base folder containing your data files (relative to repo root).
+    path: data
+
+    # File pattern to match your data. For example, "*.npy" or "envelope_flow*.mat".
+    image_type: "*.npy"
+
+    # Key inside the file that holds the image/array (if applicable).
+    # For simple formats like PNG/JPEG, this is not used.
+    image_key: img
+
+    # Optional filters (set to null if you do not need them).
+    select:
+      file_range: null      # e.g. [0, 10]
+      pair_indices: null    # e.g. [[0, 1], [1, 2]]
+      max_pairs: null
+
+    # Optional resize step for input images / arrays.
+    image_resize:
+      width: 256
+      height: 256
+
+  # Normalization and conversion settings (follow RAFT/VoxelMorph examples).
+  normalization:
+    type: none         # or "clip", "zscore", etc., depending on your dataset
+    clip_min: 0.0
+    clip_max: 255.0
+
+  conversion:
+    # How to pack the input pair into a tensor (what the dataset hands to the adapter).
+    # Common options in this repo:
+    # - "pair_gray"  -> two grayscale frames stacked along a new "pair" axis,
+    #                   usually used for optical-flow style models like RAFT
+    # - "stack2ch"   -> source and target stacked into 2 channels [2, H, W],
+    #                   often used for registration models like VoxelMorph
+    # Add new modes only if your model expects a different layout, and document it
+    # in your adapter so it is clear how images are shaped.
+    view: pair_gray
+    dtype: float32
+
+models:
+  # This key must match the model name above (after you rename it).
+  base_model:
+    model_settings:
+      # Put model-specific options here. Your adapter will read these.
+      # Examples:
+      #   hidden_dim: 128
+      #   num_layers: 4
+      hidden_dim: 128
+      num_layers: 4
+
+      # Optional pretrained checkpoint handling (adapter decides how to use it).
+      pretrained:
+        use: false
+        path: null  # e.g. models/base_model/checkpoints/base_model.pth
+
+runtime:
+  # Device selection: "cpu", "cuda", "mps", or "auto"
+  device: auto
+  num_workers: 0
+  log_freq: 5
+  mode: train
+
+training:
+  # This key must also match the model name you use.
+  base_model:
+    batch_size: 4
+    shuffle: true
+    lr: 1.0e-4
+    num_steps: 200
+    mixed_precision: false
+
+    # The adapter is free to interpret this "loss" section.
+    loss:
+      # e.g. "photometric_smooth", "registration", or anything your adapter expects.
+      type: custom
+      w_main: 1.0
+      w_smooth: 0.05
+
+output:
+  # Base directory where training runs are stored.
+  path: runs
+
+  # Name prefix for this experiment; a new subfolder will be created automatically.
+  name: base_model_train
+
+  # Inference output options.
+  inference:
+    # Folder (relative to repo root) to write displacement / flow outputs to.
+    outdir: outputs/base_model_disp
+
+    # How to store results:
+    #   "per_pair"   -> one .mat file per pair (p1__p2_flow.mat)
+    #   "single_mat" -> one big .mat with all pairs
+    #   "separate_xy"-> two .mat files (disp_x.mat, disp_y.mat)
+    format: single_mat
+
+    # File name for the single_mat / combined result (if used).
+    filename: base_model_disp_all.mat
+
+    # Whether to save visualization PNGs from the adapter (if it provides them).
+    save_vis: true
+
+    # If true, inference will skip files that already exist.
+    skip_existing: true
+
+
