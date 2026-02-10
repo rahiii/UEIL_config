@@ -100,11 +100,13 @@ training:
     num_steps: 200
     mixed_precision: false
 
-    # The adapter is free to interpret this "loss" section.
+    # Loss is now selected centrally by framework/loss.py.
+    # Supported types out of the box:
+    #   - "photometric_smooth" / "photo_smooth": unsupervised flow (photo + smooth)
+    #   - "none": disable loss (e.g. inference-only runs)
     loss:
-      # e.g. "photometric_smooth", "registration", or anything your adapter expects.
-      type: custom
-      w_main: 1.0
+      type: photometric_smooth
+      w_photo: 1.0
       w_smooth: 0.05
 
 output:

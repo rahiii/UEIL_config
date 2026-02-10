@@ -11,6 +11,7 @@ import torch
 
 from framework.registry import load_adapter
 from framework.datasets import build_dataloader
+from framework.loss import compute_loss
 
 
 def pick_device(cfg) -> torch.device:
@@ -107,9 +108,7 @@ def main():
     steps = int(train_cfg.get("num_steps", 100))
     lr = float(train_cfg.get("lr", 1e-5))
 
-    loss_cfg = train_cfg.get("loss", {})
-    w_photo = float(loss_cfg.get("w_photo", 1.0))
-    w_smooth = float(loss_cfg.get("w_smooth", 0.05))
+    loss_cfg = train_cfg.get("loss", {}) or {}
 
     log_freq = int(runtime.get("log_freq", 5))
 
@@ -138,13 +137,15 @@ def main():
         img1 = batch["img1"].to(device)
         img2 = batch["img2"].to(device)
 
-        # All adapters must provide compute_loss method
-        if not hasattr(adapter, "compute_loss"):
-            raise NotImplementedError(
-                f"Adapter for {model_name} must implement compute_loss() method. "
-                f"Each model should use its own native loss functions."
-            )
-        losses = adapter.compute_loss(img1, img2, flow, loss_cfg, model)
+        # Central, config-driven loss selection
+        losses = compute_loss(
+            loss_cfg,
+            img1=img1,
+            img2=img2,
+            flow=flow,
+            model=model,
+            batch=batch,
+        )
 
         opt.zero_grad(set_to_none=True)
         losses["total"].backward()
