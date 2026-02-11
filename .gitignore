@@ -7,3 +7,6 @@ __pycache__/
 
 # Local data (do not push)
 data/
+
+# Model repos (cloned locally, not pushed)
+models/
