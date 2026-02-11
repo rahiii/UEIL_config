@@ -1,152 +1,112 @@
 ## Overview
 
-This repository provides a framework for training and running displacement / flow models (for example RAFT) using YAML config files.
+Framework for training and running displacement / flow models using YAML configs.
 
 ## Requirements
 
-- **conda** (recommended) with Python 3.10 or later
-- **GPU** is optional (CUDA or Apple MPS if available); CPU will work but be slower
+- **conda** with Python 3.10+
+- GPU optional (CUDA or Apple MPS); CPU works but slower
 
-## Quick start (RAFT example)
-
-1. Open a terminal in the root of this repo.
-2. Make sure the sample `.mat` files are present in the `data/` directory (already included for the RAFT config).
-3. Create the conda environment and install dependencies:
+## Add a new model
 
 ```bash
-bash scripts/setup.sh configs/raft.yaml
+python scripts/add_model.py
 ```
 
-4. Activate the environment:
+Answer 5 questions. It generates `configs/<name>.yaml`. No Python adapter file needed. Then:
 
 ```bash
-conda activate raft
+bash scripts/setup.sh configs/<name>.yaml
+conda activate <name>
+python train.py --config configs/<name>.yaml
+python inference.py --config configs/<name>.yaml
 ```
 
-5. Start training:
+## How the config works
+
+The config drives everything. You write the model name **once**. Every field maps to a specific file:
+
+| Config key | What it does | Read by |
+|---|---|---|
+| `model` | Name for logging / lookups | `train.py`, `inference.py` |
+| `adapter.entry_point` | Python class to import | `framework/adapter.py` → `_import_class()` |
+| `adapter.build_args` | Kwargs passed to constructor | `framework/adapter.py` → `GenericAdapter.build()` |
+| `adapter.forward.input` | What tensors to pass to model | `framework/adapter.py` → `GenericAdapter.forward()` |
+| `adapter.forward.output` | How to extract flow from result | `framework/adapter.py` → `_extract_flow()` |
+| `adapter.forward.output_format` | Shape of flow tensor | `framework/adapter.py` → `_normalize_flow()` |
+| `setup` | Conda/pip deps | `scripts/setup.sh` |
+| `input.data_input` | Data path, file pattern, resize | `framework/datasets.py` |
+| `input.conversion.view` | Tensor layout sent to model | `framework/datasets.py` → `apply_conversion()` |
+| `training.lr`, `.batch_size`, etc. | Training hyperparams | `train.py` |
+| `training.loss` | Loss function + weights | `framework/loss.py` → `compute_loss()` |
+| `output.inference` | Where/how to save results | `inference.py` |
+
+## Adapter input modes
+
+| Mode | Batch keys | Model call |
+|---|---|---|
+| `pair_rgb` | `img1 [B,3,H,W]`, `img2 [B,3,H,W]` | `model(img1, img2)` |
+| `pair_gray` | `img1 [B,1,H,W]`, `img2 [B,1,H,W]` | `model(img1, img2)` |
+| `stack2ch` | `x [B,2,H,W]` | `model(x)` |
+| `stack6ch` | `x [B,6,H,W]` | `model(x)` |
+| `video_tchw` | `x [B,T,C,H,W]` | `model(x)` |
+
+## Adapter output modes
+
+| Mode | Model returns | Framework takes |
+|---|---|---|
+| `direct` | flow tensor | as-is |
+| `list_last` | `[iter1, ..., final]` | `[-1]` |
+| `list_first` | `[flow, ...]` | `[0]` |
+| `tuple_first` | `(flow, extras)` | `[0]` |
+| `tuple_index:N` | `(a, b, c)` | `[N]` |
+| `dict_key:K` | `{"K": flow}` | `["K"]` |
+
+## Custom adapter (escape hatch)
+
+If the generic adapter can't handle your model, create `models/<name>/adapter.py`:
+
+```python
+class Adapter:
+    def build(self, cfg, repo_root):
+        from models.mymodel.net import MyNet
+        return MyNet()
+
+    def forward(self, model, batch, cfg):
+        device = next(model.parameters()).device
+        img1 = batch["img1"].to(device)
+        img2 = batch["img2"].to(device)
+        flow = model(img1, img2)
+        return {
+            "disp_x": flow[:, 0].cpu(),
+            "disp_y": flow[:, 1].cpu(),
+            "flow_device": flow,
+            "flow_vis_rgb": ...,  # [B,3,H,W] uint8
+        }
+```
+
+Remove the `adapter:` block from your config — the file-based adapter is only used when the config has no `adapter.entry_point`.
+
+## Visualize
 
 ```bash
-python train.py --config configs/raft.yaml
+python scripts/visualize.py --mat outputs/<model>_disp/<file>_flow.mat
+python scripts/visualize.py --mat outputs/<model>_disp/<model>_disp_all.mat --pair_idx 0
 ```
 
-## Run inference
+## Project structure
 
-With the same environment active:
-
-```bash
-python inference.py --config configs/raft.yaml
 ```
-
-By default, displacement fields and optional visualizations are written under `outputs/raft_disp` (see `output.inference` in `configs/raft.yaml`).
-
-## Visualize displacement fields
-
-To visualize `.mat` flow files produced by inference or training:
-
-```bash
-python scripts/visualize.py --mat outputs/raft_disp/envelope_flow41__envelope_flow42_flow.mat
-```
-
-You can also visualize a combined `raft_disp_all.mat` file and choose a pair index:
-
-```bash
-python scripts/visualize.py --mat outputs/raft_disp/raft_disp_all.mat --pair_idx 0 --stride 20
-```
-
-## Using a different model
-
-- **Create a config**: add a YAML file under `configs/` that sets `model:` and a `setup:` section with its dependencies.
-- **Set up the env**: run `bash scripts/setup.sh <path_to_new_config>`.
-- **Train / infer**: run `train.py` and `inference.py` with `--config <path_to_new_config>`.
-
-## How to write a config file
-
-The easiest way is to copy an existing config (for example `configs/raft.yaml` or `configs/voxelmorph.yaml`) and change only what you need.
-
-At minimum, a config should define:
-
-- **model**: short model name, for example:
-
-```yaml
-model: mymodel
-```
-
-- **setup**: Python version and dependencies to install into the conda env:
-
-```yaml
-setup:
-  python: "3.10"
-  conda:
-    - "numpy"
-    - "scipy"
-  pip:
-    - "torch"
-    - "torchvision"
-```
-
-- **input**: where the data lives and how to read it:
-
-```yaml
-input:
-  data_input:
-    path: data
-    image_type: envelope_flow*.mat
-    image_key: img
-```
-
-- **models.<model_name>**: model-specific settings, read by your adapter:
-
-```yaml
-models:
-  mymodel:
-    model_settings:
-      # your model options here
-```
-
-- **training.<model_name>**: training hyperparameters:
-
-```yaml
-training:
-  mymodel:
-    batch_size: 4
-    lr: 1.0e-4
-    num_steps: 200
-```
-
-See `configs/raft.yaml` and `configs/voxelmorph.yaml` for full examples.
-
-## How adapters work
-
-- **Lookup**: the framework calls `load_adapter(model_name)` from `framework/registry.py`.
-- **Search order**:
-  - first tries `framework/adapters/<model_name>.py` with a class named `Adapter`
-  - if that is missing, it tries `models/<model_name>/adapter.py` with `Adapter`, `<MODEL>Adapter`, or `<Model>Adapter`
-- **Required methods**:
-  - `build(cfg, repo_root) -> torch.nn.Module`: build and return the model
-  - `forward(model, batch, cfg) -> dict`: run the model and return at least `disp_x`, `disp_y`, and any visualization tensors
-  - optionally `compute_loss(...)` for training, if you want to use `train.py`
-
-To add a new model:
-
-1. Put the third-party code under `models/<model_name>/` (or use an existing installed package).
-2. Create `framework/adapters/<model_name>.py` (or `models/<model_name>/adapter.py`) with an `Adapter` class that follows the RAFT and VoxelMorph adapters as templates.
-3. Create `configs/<model_name>.yaml` as devscribed above, then run `scripts/setup.sh`, `train.py`, and `inference.py` with that config.
-
-## Template files you can copy
-
-- **Base config template**: `configs/base_model.yaml`
-  - Copy to `configs/<your_model_name>.yaml`.
-  - Rename `model: base_model` to `model: <your_model_name>`.
-  - Update `models.base_model` and `training.base_model` keys to match your model name.
-- **Base adapter template**: `framework/adapters/base_model.py`
-  - Copy to `framework/adapters/<your_model_name>.py`.
-  - Implement `build`, `forward`, and `compute_loss` following the comments in the file.
-
-After copying and editing these two templates, you can run:
-
-```bash
-bash scripts/setup.sh configs/<your_model_name>.yaml
-conda activate <your_model_name>
-python train.py --config configs/<your_model_name>.yaml
-python inference.py --config configs/<your_model_name>.yaml
+configs/             YAML configs (one per model)
+framework/
+  adapter.py         Config-driven adapter + loader
+  datasets.py        Data loading, normalization, tensor conversion
+  loss.py            Loss functions (photometric, NCC, MSE, etc.)
+models/              Model code (cloned repos or your own)
+scripts/
+  add_model.py       Interactive scaffolding
+  setup.sh           Conda env + dependency installer
+  visualize.py       Displacement field plotting
+train.py             Training loop
+inference.py         Inference loop
 ```

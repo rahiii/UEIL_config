@@ -125,7 +125,7 @@ def loss_photometric_smooth(
     **_,
 ) -> Dict[str, torch.Tensor]:
     """
-    Unsupervised RAFT-style objective:
+    Unsupervised photometric + smoothness objective:
       - photometric term between img1 and warped img2
       - first-order smoothness on flow
     """
@@ -163,7 +163,7 @@ def loss_ncc_smooth(
     **_,
 ) -> Dict[str, torch.Tensor]:
     """
-    VoxelMorph-style objective (very simplified):
+    NCC + smoothness objective:
       - NCC similarity between img1 and img2
       - smoothness on flow
     Loss = w_smooth * smooth - w_ncc * NCC   (maximize NCC, minimize smoothness)
@@ -196,27 +196,24 @@ def compute_loss(
 
     Config examples:
 
-      # Unsupervised flow (RAFT-style)
+      # Unsupervised photometric + smoothness
       training:
-        raft:
-          loss:
-            type: photometric_smooth
-            w_photo: 1.0
-            w_smooth: 0.05
+        loss:
+          type: photometric_smooth
+          w_photo: 1.0
+          w_smooth: 0.05
 
       # Simple MSE between img1 and img2 (ignores flow)
       training:
-        some_model:
-          loss:
-            type: mse
+        loss:
+          type: mse
 
-      # VoxelMorph-style NCC + smoothness
+      # NCC + smoothness
       training:
-        voxelmorph:
-          loss:
-            type: ncc_smooth
-            w_ncc: 1.0
-            w_smooth: 0.05
+        loss:
+          type: ncc_smooth
+          w_ncc: 1.0
+          w_smooth: 0.05
     """
     ltype = str(loss_cfg.get("type", "photometric_smooth")).lower()
 

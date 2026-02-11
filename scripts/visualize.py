@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Visualize displacement fields from RAFT output .mat files.
+Visualize displacement fields from output .mat files.
 
 Usage:
-    python scripts/visualize.py --mat outputs/raft_disp/envelope_flow41__envelope_flow42_flow.mat
-    python scripts/visualize.py --mat outputs/raft_disp/raft_disp_all.mat --pair_idx 0
-    python scripts/visualize.py --mat outputs/raft_disp/raft_disp_all.mat --pair_idx 0 --stride 20
+    python scripts/visualize.py --mat outputs/<model>_disp/<model>_disp_all.mat
+    python scripts/visualize.py --mat outputs/<model>_disp/<model>_disp_all.mat --pair_idx 0
+    python scripts/visualize.py --mat outputs/<model>_disp/<model>_disp_all.mat --pair_idx 0 --stride 20
 """
 import argparse
 from pathlib import Path
@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Visualize displacement fields from RAFT output .mat files"
+        description="Visualize displacement fields from output .mat files"
     )
     ap.add_argument("--mat", required=True, help="Path to *_flow.mat with disp_x/disp_y")
     ap.add_argument("--stride", type=int, default=10, help="Quiver stride (default: 10)")

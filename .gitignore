@@ -1,4 +1,4 @@
-.# OS-specific files
+# OS-specific files
 .DS_Store
 
 # Python cache
@@ -7,5 +7,3 @@ __pycache__/
 
 # Local data (do not push)
 data/
-
-
