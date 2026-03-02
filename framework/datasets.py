@@ -57,6 +57,7 @@ class EnvelopeMatDataset(data.Dataset):
         if isinstance(roots, str):
             roots = [roots]
         self.roots = [osp.abspath(r) for r in roots]
+        self.pattern = pattern
         self.target_size = tuple(target_size)
         self.log_compress = log_compress
         self.cache_max = cache_max
