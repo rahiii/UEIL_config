@@ -50,6 +50,13 @@ SUM_FREQ = 100
 # Model factory — dynamically loads models/<name>/adapter.py
 # ---------------------------------------------------------------------------
 
+def _freeze_bn(model):
+    """Safely call freeze_bn() whether or not the model is wrapped in DataParallel."""
+    inner = model.module if hasattr(model, 'module') else model
+    if hasattr(inner, 'freeze_bn'):
+        inner.freeze_bn()
+
+
 def build_model(args):
     """Load the adapter for args.model and return (model, forward_fn).
 
@@ -76,9 +83,7 @@ def build_model(args):
 
     model.cuda()
     model.train()
-
-    if hasattr(model.module, 'freeze_bn'):
-        model.module.freeze_bn()
+    _freeze_bn(model)
 
     return model, forward_fn
 
@@ -254,16 +259,14 @@ def train(args):
                             val_total += vloss.item()
                             val_n += 1
                     model.train()
-                    if hasattr(model.module, 'freeze_bn'):
-                        model.module.freeze_bn()
+                    _freeze_bn(model)
                     if val_n > 0:
                         avg = val_total / val_n
                         print("  val_loss=%.4f (step %d)" % (avg, total_steps + 1))
                         logger.write_dict({'val/loss': avg})
 
                 model.train()
-                if hasattr(model.module, 'freeze_bn'):
-                    model.module.freeze_bn()
+                _freeze_bn(model)
 
             total_steps += 1
             if total_steps > args.num_steps:

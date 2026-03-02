@@ -197,18 +197,17 @@ _COMPONENT_NAMES = {
     'conv2drelu', 'conv3drelu', 'registrationhead', 'spatialtransformer',
     'register_model', 'upsample', 'downsample', 'norm', 'loss', 'grad',
     'ncc', 'ssim', 'dice', 'mind', 'mutual', 'regularizer', 'sinpositional',
+    # RAFT sub-modules — prevent auto-selecting these instead of RAFT itself
+    'basicupdateblock', 'smallupdateblock', 'basicmotionencoder',
+    'smallmotionencoder', 'basicencoder', 'smallencoder',
+    'corrblock', 'altcorrblock', 'alternatecorrblock', 'convex', 'poolcorrblock',
 }
 
 
 def _is_likely_toplevel_model(cls_name):
     """Heuristic: skip sub-components, keep top-level model classes."""
     lower = cls_name.lower().replace('_', '')
-    if lower in _COMPONENT_NAMES:
-        return False
-    for comp in _COMPONENT_NAMES:
-        if lower == comp:
-            return False
-    return True
+    return lower not in _COMPONENT_NAMES
 
 
 def pick_model(scan_results, model_dir, model_name):
@@ -237,6 +236,15 @@ def pick_model(scan_results, model_dir, model_name):
     if name_match:
         pool = name_match
 
+    # Special-case: VoxelMorph repositories often use "Vxm*" class names, which
+    # won't match the folder name "voxelmorph".
+    if any(k in name_norm for k in ('voxelmorph', 'vxm')):
+        vxm_pool = [c for c in pool
+                    if 'vxm' in c[1]['name'].lower()
+                    or c[2].filepath.lower().endswith(('nn\\models.py', 'nn/models.py'))]
+        if vxm_pool:
+            pool = vxm_pool
+
     # Among matches, prefer 2D if available
     pool_2d = [c for c in pool if '2d' in c[2].filepath.lower() or '2D' in c[2].filepath]
     if pool_2d:
@@ -246,9 +254,7 @@ def pick_model(scan_results, model_dir, model_name):
     if len(pool) == 1:
         choice = pool[0]
         print("  Auto-detected model class: %s" % choice[0])
-        confirm = ask("  Use this?", "y")
-        if confirm.lower() in ('y', 'yes'):
-            return choice[1], choice[2]
+        return choice[1], choice[2]
 
     # If a few, let user pick from the filtered list
     if len(pool) <= 15:
@@ -298,64 +304,90 @@ def pick_configs(scan_results, model_dir):
 # Compute import path from a file relative to model_dir
 # ---------------------------------------------------------------------------
 
-def compute_sys_path_and_import(model_info, cls_info, model_dir):
-    """Figure out what sys.path entry and import statement to use."""
+def compute_sys_paths_and_import(model_info, cls_info, model_dir):
+    """Return (sys_path_dirs, import_module, cls_name).
+
+    Some models (notably RAFT) rely on bare sibling imports inside the model file
+    (e.g. `from update import ...`). To support those, we add BOTH:
+      - the package root (to import `from core.raft import RAFT`)
+      - the file's parent directory (so bare sibling imports resolve)
+    """
     filepath = model_info.filepath
     cls_name = cls_info['name']
-
-    # Walk up from the file to find the deepest directory that is NOT model_dir
-    # and where the file can be imported from
     relpath = os.path.relpath(filepath, model_dir)
     parts = relpath.replace('\\', '/').split('/')
-
-    # The file is: parts[-1] (e.g. TransMorph.py)
-    # The dirs are: parts[:-1] (e.g. ['RaFD', 'TransMorph2D', 'models'])
-
-    # Strategy: sys.path = the directory such that `from <remaining> import <cls>` works
-    # We want the shallowest sys.path that gives a valid import.
-    # For "RaFD/TransMorph2D/models/TransMorph.py" from model_dir:
-    #   sys.path = model_dir/RaFD/TransMorph2D  ->  from models.TransMorph import TransMorph
-    # This matches what the model's own code uses internally.
-
     module_file = parts[-1].replace('.py', '')
     dir_parts = parts[:-1]
 
-    # Look for __init__.py files to find the package boundary
-    # Walk from the file upward until we find a dir without __init__.py
-    sys_path_parts = []
-    import_parts = list(dir_parts) + [module_file]
-
+    # Find deepest directory that has an __init__.py (package boundary)
+    pkg_depth = None
     for i in range(len(dir_parts)):
-        check_dir = os.path.join(model_dir, *dir_parts[:i + 1])
-        if os.path.isfile(os.path.join(check_dir, '__init__.py')):
-            # This dir is a package, so the sys.path should be above it
-            sys_path_parts = dir_parts[:i]
-            import_parts = dir_parts[i:] + [module_file]
-            break
+        check = os.path.join(model_dir, *dir_parts[:i + 1])
+        if os.path.isfile(os.path.join(check, '__init__.py')):
+            pkg_depth = i
+
+    if pkg_depth is not None:
+        # sys.path for package import
+        sys_path_a = os.path.join(model_dir, *dir_parts[:pkg_depth]) if pkg_depth > 0 else model_dir
+        import_parts = dir_parts[pkg_depth:] + [module_file]
     else:
-        # No __init__.py found — try: sys.path = parent of first dir containing the file
-        if len(dir_parts) >= 1:
-            # Check if the deepest dir has __init__.py
-            for depth in range(len(dir_parts) - 1, -1, -1):
-                check_dir = os.path.join(model_dir, *dir_parts[:depth + 1])
-                if os.path.isfile(os.path.join(check_dir, '__init__.py')):
-                    sys_path_parts = dir_parts[:depth]
-                    import_parts = dir_parts[depth:] + [module_file]
-                    break
-            else:
-                # No packages at all — add the file's parent dir to sys.path
-                sys_path_parts = dir_parts
-                import_parts = [module_file]
+        sys_path_a = os.path.join(model_dir, *dir_parts) if dir_parts else model_dir
+        import_parts = [module_file]
 
-    if sys_path_parts:
-        # Use os.path.join at runtime so it works cross-platform
-        sys_path_rel = sys_path_parts
-    else:
-        sys_path_rel = None
+    # sys.path for bare sibling imports inside the model file
+    file_parent = os.path.join(model_dir, *dir_parts) if dir_parts else model_dir
 
-    import_module = '.'.join(import_parts)
+    # Always include model_dir as a fallback
+    sys_path_dirs = []
+    for p in (sys_path_a, file_parent, model_dir):
+        p = os.path.normpath(p)
+        if p not in sys_path_dirs:
+            sys_path_dirs.append(p)
 
-    return sys_path_rel, import_module, cls_name
+    return sys_path_dirs, '.'.join(import_parts), cls_name
+
+
+def detect_model_style(model_name, cls_info):
+    """Return one of: 'raft', 'voxelmorph', 'config_based', 'generic'."""
+    init_params = cls_info.get('init_params', [])
+    ret_pattern = cls_info.get('ret_pattern', 'unknown')
+    name_l = (model_name or '').lower()
+    cls_l = (cls_info.get('name') or '').lower()
+
+    # RAFT-style: __init__(args/opt), forward(image1, image2, ...) returns list
+    if init_params in (['args'], ['opt']) and cls_info.get('fwd_params', 0) == 2:
+        if 'raft' in name_l or cls_info.get('ret_pattern') == 'list':
+            return 'raft'
+
+    # VoxelMorph-style registration: often returns (moved, flow)
+    if (
+        any(kw in name_l for kw in ('voxelmorph', 'morph', 'vxm'))
+        or cls_l.startswith('vxm')
+        or 'voxelmorph' in cls_l
+    ):
+        return 'voxelmorph'
+
+    if any(p in init_params for p in ('config', 'cfg', 'hparams')):
+        return 'config_based'
+
+    return 'generic'
+
+
+def _build_sys_path_block(sys_path_dirs, model_dir):
+    """Generate sys.path setup lines for adapter.py (paths relative to model_dir)."""
+    lines = []
+    for i, abs_path in enumerate(sys_path_dirs):
+        var = '_p%d' % i
+        rel = os.path.relpath(abs_path, model_dir)
+        if rel == '.':
+            lines.append("%s = os.path.dirname(__file__)" % var)
+        else:
+            segs = rel.replace('\\', '/').split('/')
+            lines.append("%s = os.path.join(os.path.dirname(__file__), %s)" % (
+                var, ', '.join(repr(s) for s in segs)
+            ))
+        lines.append("if %s not in sys.path:\n    sys.path.insert(0, %s)" % (var, var))
+    return '\n'.join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +408,7 @@ def detect_in_chans(scan_results):
 def generate_adapter(name, model_dir, cls_info, model_info, configs_var, configs_keys, configs_info, in_chans):
     """Generate a working adapter.py string."""
 
-    sys_path_rel, import_module, cls_name = compute_sys_path_and_import(model_info, cls_info, model_dir)
+    sys_path_dirs, import_module, cls_name = compute_sys_paths_and_import(model_info, cls_info, model_dir)
 
     fwd_params = cls_info['fwd_params']     # 1 = concat, 2 = separate
     ret_pattern = cls_info['ret_pattern']   # tuple / list / single
@@ -385,20 +417,7 @@ def generate_adapter(name, model_dir, cls_info, model_info, configs_var, configs
     concat_input = (fwd_params == 1)
     needs_grayscale = (in_chans is not None and in_chans <= 2 and concat_input)
 
-    # Build sys.path setup
-    if sys_path_rel:
-        parts_str = ', '.join(repr(p) for p in sys_path_rel)
-        sys_path_code = (
-            "_sub = os.path.join(os.path.dirname(__file__), %s)\n"
-            "if _sub not in sys.path:\n"
-            "    sys.path.insert(0, _sub)\n"
-        ) % parts_str
-    else:
-        sys_path_code = (
-            "_root = os.path.dirname(__file__)\n"
-            "if _root not in sys.path:\n"
-            "    sys.path.insert(0, _root)\n"
-        )
+    style = detect_model_style(name, cls_info)
 
     # Build import line
     extra_imports = ""
@@ -406,16 +425,45 @@ def generate_adapter(name, model_dir, cls_info, model_info, configs_var, configs
         import_line = "from %s import %s, %s" % (import_module, cls_name, configs_var)
     elif configs_var and configs_info:
         # CONFIGS in a different file than the class
-        cfg_sys_rel, cfg_import_mod, _ = compute_sys_path_and_import(
+        cfg_sys_dirs, cfg_import_mod, _ = compute_sys_paths_and_import(
             configs_info, {'name': configs_var}, model_dir)
         import_line = "from %s import %s" % (import_module, cls_name)
         extra_imports = "from %s import %s" % (cfg_import_mod, configs_var)
     else:
         import_line = "from %s import %s" % (import_module, cls_name)
 
+    # sys.path block must include config import locations too (if different)
+    if configs_var and configs_info and configs_info.filepath != model_info.filepath:
+        for p in cfg_sys_dirs:
+            if p not in sys_path_dirs:
+                sys_path_dirs.append(p)
+    sys_path_code = _build_sys_path_block(sys_path_dirs, model_dir)
+
     # Build build() function
     init_params = cls_info.get('init_params', [])
-    if configs_var and configs_keys:
+    if style == 'raft':
+        build_body = (
+            '    net = %s(args)\n'
+            '    return nn.DataParallel(net, device_ids=args.gpus)'
+        ) % cls_name
+    elif style == 'voxelmorph':
+        # Newer voxelmorph (PyTorch) uses VxmPairwise(ndim, source_channels, target_channels, ...)
+        build_body = (
+            '    ndim = int(getattr(args, \'vxm_ndim\', len(args.image_size)))\n'
+            '    source_channels = int(getattr(args, \'vxm_source_channels\', 1))\n'
+            '    target_channels = int(getattr(args, \'vxm_target_channels\', 1))\n'
+            '    integration_steps = int(getattr(args, \'vxm_int_steps\', 5))\n'
+            '    nb_features = getattr(args, \'vxm_nb_features\', None)\n'
+            '    net = %s(\n'
+            '        ndim=ndim,\n'
+            '        source_channels=source_channels,\n'
+            '        target_channels=target_channels,\n'
+            '        nb_features=nb_features or (16, 16, 16, 16, 16),\n'
+            '        integration_steps=integration_steps,\n'
+            '    )\n'
+            '    return nn.DataParallel(net, device_ids=args.gpus)'
+        ) % cls_name
+    elif configs_var and configs_keys:
         default_variant = configs_keys[0]
         build_body = (
             '    variant = getattr(args, \'%s_variant\', \'%s\')\n'
@@ -442,40 +490,80 @@ def generate_adapter(name, model_dir, cls_info, model_info, configs_var, configs
         ) % (cls_name, ', '.join(init_params) if init_params else 'none')
 
     # Build forward() function
-    torch_import = ""
-    if concat_input:
+    if style == 'raft':
+        torch_import = ""
+        fwd_prep = (
+            "    import torch.nn.functional as F\n"
+            "    iters = int(getattr(args, 'iters', 12))\n"
+            "    # RAFT requires H and W divisible by 8\n"
+            "    H, W = img1.shape[-2], img1.shape[-1]\n"
+            "    pad_h = (8 - H % 8) % 8\n"
+            "    pad_w = (8 - W % 8) % 8\n"
+            "    if pad_h > 0 or pad_w > 0:\n"
+            "        img1 = F.pad(img1, [0, pad_w, 0, pad_h])\n"
+            "        img2 = F.pad(img2, [0, pad_w, 0, pad_h])\n"
+        )
+        fwd_call = "    flow_preds = model(img1, img2, iters=iters, test_mode=False)"
+        fwd_return = (
+            "    if pad_h > 0 or pad_w > 0:\n"
+            "        flow_preds = [f[:, :, :H, :W] for f in flow_preds]\n"
+            "    return flow_preds"
+        )
+    elif style == 'voxelmorph':
         torch_import = "import torch\n"
-
-    # Detect normalization: registration models expect [0,1], optical flow models [0,255].
-    registration_keywords = ('morph', 'register', 'deform', 'warp', 'stn')
-    is_registration = any(kw in name.lower() for kw in registration_keywords)
-    normalize = (in_chans is not None) or concat_input or is_registration
-
-    if concat_input and needs_grayscale:
         fwd_prep = (
-            "    gray1 = img1.mean(dim=1, keepdim=True) / 255.0\n"
-            "    gray2 = img2.mean(dim=1, keepdim=True) / 255.0\n"
-            "    x_in = torch.cat((gray1, gray2), dim=1)\n"
+            "    # VoxelMorph expects [0,1] float images.\n"
+            "    sc = int(getattr(args, 'vxm_source_channels', 1))\n"
+            "    tc = int(getattr(args, 'vxm_target_channels', 1))\n"
+            "    source = img1 / 255.0\n"
+            "    target = img2 / 255.0\n"
+            "    if sc == 1 and source.shape[1] != 1:\n"
+            "        source = source.mean(dim=1, keepdim=True)\n"
+            "    if tc == 1 and target.shape[1] != 1:\n"
+            "        target = target.mean(dim=1, keepdim=True)\n"
         )
-        fwd_call = "    out = model(x_in)"
-    elif concat_input:
-        fwd_prep = (
-            "    x_in = torch.cat((img1 / 255.0, img2 / 255.0), dim=1)\n"
+        fwd_call = "    out = model(source, target)"
+        fwd_return = (
+            "    flow = out[0] if isinstance(out, tuple) else out\n"
+            "    if hasattr(flow, 'ndim') and flow.ndim == 4 and flow.shape[-1] == 2:\n"
+            "        flow = flow.permute(0, 3, 1, 2).contiguous()\n"
+            "    return [flow]"
         )
-        fwd_call = "    out = model(x_in)"
-    elif normalize:
-        fwd_prep = ""
-        fwd_call = "    out = model(img1 / 255.0, img2 / 255.0)"
     else:
-        fwd_prep = ""
-        fwd_call = "    out = model(img1, img2)"
+        torch_import = "import torch\n" if concat_input or needs_grayscale else ""
 
-    if ret_pattern == 'tuple':
-        fwd_return = "    warped, flow = out\n    return [flow]"
-    elif ret_pattern == 'list':
-        fwd_return = "    return out if isinstance(out, list) else [out]"
-    else:
-        fwd_return = "    return [out] if not isinstance(out, (list, tuple)) else list(out)"
+        registration_keywords = ('morph', 'register', 'deform', 'warp', 'stn')
+        is_registration = any(kw in name.lower() for kw in registration_keywords)
+        normalize = (in_chans is not None) or concat_input or is_registration
+
+        if concat_input and needs_grayscale:
+            fwd_prep = (
+                "    gray1 = img1.mean(dim=1, keepdim=True) / 255.0\n"
+                "    gray2 = img2.mean(dim=1, keepdim=True) / 255.0\n"
+                "    x_in = torch.cat((gray1, gray2), dim=1)\n"
+            )
+            fwd_call = "    out = model(x_in)"
+        elif concat_input:
+            fwd_prep = "    x_in = torch.cat((img1 / 255.0, img2 / 255.0), dim=1)\n"
+            fwd_call = "    out = model(x_in)"
+        elif normalize:
+            fwd_prep = ""
+            fwd_call = "    out = model(img1 / 255.0, img2 / 255.0)"
+        else:
+            fwd_prep = ""
+            fwd_call = "    out = model(img1, img2)"
+
+        if ret_pattern == 'tuple':
+            fwd_return = (
+                "    warped, flow = out\n"
+                "    if hasattr(flow, 'ndim') and flow.ndim == 4 and flow.shape[-1] == 2:\n"
+                "        flow = flow.permute(0, 3, 1, 2).contiguous()\n"
+                "    return [flow]"
+            )
+        elif ret_pattern == 'list':
+            fwd_return = "    return out if isinstance(out, list) else [out]"
+        else:
+            fwd_return = "    return [out] if not isinstance(out, (list, tuple)) else list(out)"
 
     # Assemble
     lines = []
@@ -533,8 +621,9 @@ def generate_config(name, configs_keys, in_chans):
                 pass
 
     is_transformer = any(kw in name.lower() for kw in ('trans', 'swin', 'vit', 'attention'))
-    batch_default = 4 if is_transformer else 12
-    img_size = "[256, 256]" if is_transformer else "[384, 512]"
+    is_registration = any(kw in name.lower() for kw in ('morph', 'vxm', 'register', 'deform'))
+    batch_default = 4 if is_transformer else 6 if is_registration else 12
+    img_size = "[256, 256]"
 
     extra_yaml = ""
     if configs_keys:
@@ -581,6 +670,25 @@ def generate_config(name, configs_keys, in_chans):
     """).format(name=name, batch=batch_default, img_size=img_size, data_root_block=data_root_block)
 
     content += extra_yaml
+
+    if name.lower() == 'raft':
+        content += textwrap.dedent("""\
+
+            # ── RAFT-specific ─────────────────────────────────────
+            small: false
+            iters: 12
+            dropout: 0.0
+            alternate_corr: false
+        """)
+
+    if is_registration and 'morph' in name.lower():
+        content += textwrap.dedent("""\
+
+            # ── VoxelMorph-specific ───────────────────────────────
+            vxm_int_steps: 7
+            # vxm_features: [16, 32, 32, 32, 32, 32, 32, 32, 16, 16]
+        """)
+
     return content
 
 
@@ -690,13 +798,14 @@ def main():
             cwd=ROOT,
         )
     elif os.path.isfile(setup_script):
-        run_setup = ask("\n  Run setup_model.ps1 to create conda env? (y/n)", "y")
-        if run_setup.lower() in ('y', 'yes'):
-            print("  Running setup_model.ps1 for %s ..." % name)
-            subprocess.run(
-                ['powershell', '-ExecutionPolicy', 'Bypass', '-File', setup_script, name],
-                cwd=ROOT,
-            )
+        if sys.stdin.isatty():
+            run_setup = ask("\n  Run setup_model.ps1 to create conda env? (y/n)", "y")
+            if run_setup.lower() in ('y', 'yes'):
+                print("  Running setup_model.ps1 for %s ..." % name)
+                subprocess.run(
+                    ['powershell', '-ExecutionPolicy', 'Bypass', '-File', setup_script, name],
+                    cwd=ROOT,
+                )
 
     # ── Summary ───────────────────────────────────────────────────────────
     print("\n" + "=" * 60)

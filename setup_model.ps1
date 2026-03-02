@@ -140,31 +140,43 @@ if ($envYml) {
 # Fallback: parse README for install commands (skip torch-related)
 if (-not $depsFound) {
     Write-Host "  No requirements files found, parsing README..." -ForegroundColor DarkYellow
+
+    # Conda/shorthand names that differ from their PyPI package names
+    $PipNameMap = @{
+        'opencv'      = 'opencv-python'
+        'cv2'         = 'opencv-python'
+        'sklearn'     = 'scikit-learn'
+        'skimage'     = 'scikit-image'
+        'pil'         = 'Pillow'
+        'yaml'        = 'pyyaml'
+        'attr'        = 'attrs'
+    }
+
     $readmes = Get-ChildItem -Path $ModelDir -Filter "README*" -Depth 0
     foreach ($readme in $readmes) {
         $lines = Get-Content $readme.FullName
         foreach ($line in $lines) {
             $trimmed = $line.Trim()
+            $pkgStr = $null
             if ($trimmed -match '^pip install\s+(.+)$') {
-                $raw = $Matches[1] -replace '#.*$', ''
-                $filtered = ($raw.Split(" ") | Where-Object {
-                    $pkg = $_ -replace '[=<>!].*$', ''
-                    $SkipPackages -notcontains $pkg.ToLower()
-                }) -join " "
-                if ($filtered.Trim()) {
-                    Write-Host "  README -> pip install $filtered" -ForegroundColor Green
-                    conda run -n $ModelName --no-capture-output pip install $filtered.Split(" ")
-                }
+                $pkgStr = $Matches[1] -replace '#.*$', ''
+            } elseif ($trimmed -match '^conda install\s+(.+)$') {
+                $pkgStr = $Matches[1] -replace '#.*$', '' -replace '-c\s+\S+', ''
             }
-            elseif ($trimmed -match '^conda install\s+(.+)$') {
-                $raw = $Matches[1] -replace '#.*$', '' -replace '-c\s+\S+', ''
-                $filtered = ($raw.Split(" ") | Where-Object {
-                    $pkg = $_ -replace '[=<>!].*$', ''
-                    $SkipPackages -notcontains $pkg.ToLower() -and $_.Trim() -ne ''
+
+            if ($pkgStr) {
+                $mapped = ($pkgStr.Split(" ") | Where-Object { $_.Trim() -ne '' } | ForEach-Object {
+                    $base = $_ -replace '[=<>!\[].*$', ''
+                    if ($SkipPackages -contains $base.ToLower()) { return }
+                    # Map conda/shorthand names to PyPI names
+                    if ($PipNameMap.ContainsKey($base.ToLower())) {
+                        $_ -replace "^[^=<>!\[]+", $PipNameMap[$base.ToLower()]
+                    } else { $_ }
                 }) -join " "
-                if ($filtered.Trim()) {
-                    Write-Host "  README -> pip install $filtered (converted from conda)" -ForegroundColor Green
-                    conda run -n $ModelName --no-capture-output pip install $filtered.Split(" ")
+
+                if ($mapped.Trim()) {
+                    Write-Host "  README -> pip install $mapped" -ForegroundColor Green
+                    conda run -n $ModelName --no-capture-output pip install $mapped.Split(" ")
                 }
             }
         }
